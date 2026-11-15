@@ -64,8 +64,13 @@ def get_current_settings():
 @app.post("/settings")
 def update_settings(req: SettingsRequest):
     cfg = get_config()
-    if req.download_dir and os.path.exists(req.download_dir):
-        cfg["download_dir"] = os.path.abspath(req.download_dir)
+    if req.download_dir:
+        cleaned_path = os.path.abspath(os.path.expanduser(req.download_dir.strip()))
+        try:
+            os.makedirs(cleaned_path, exist_ok=True)
+            cfg["download_dir"] = cleaned_path
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Недопустимый путь к папке: {e}")
     if req.default_bitrate:
         cfg["default_bitrate"] = req.default_bitrate
     save_config(cfg)
@@ -74,13 +79,12 @@ def update_settings(req: SettingsRequest):
 @app.post("/select-directory")
 def select_directory():
     cfg = get_config()
-    initial_dir = cfg.get("download_dir", os.path.expanduser("~/Downloads"))
     ps_cmd = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
         "[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; "
         "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-        f"$f.SelectedPath = '{initial_dir}'; "
         "$f.Description = 'Выберите папку для сохранения MP3'; "
-        "if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath }"
+        "if ($f.ShowDialog() -eq 'OK') { [Console]::WriteLine($f.SelectedPath) }"
     )
     try:
         res = subprocess.run(
@@ -90,10 +94,12 @@ def select_directory():
             encoding="utf-8"
         )
         selected = res.stdout.strip()
-        if selected and os.path.exists(selected):
-            cfg["download_dir"] = os.path.abspath(selected)
-            save_config(cfg)
-            return {"selected_path": cfg["download_dir"]}
+        if selected:
+            norm_selected = os.path.abspath(selected)
+            if os.path.exists(norm_selected):
+                cfg["download_dir"] = norm_selected
+                save_config(cfg)
+                return {"selected_path": cfg["download_dir"]}
     except Exception as e:
         print(f"Directory picker error: {e}")
     return {"selected_path": cfg.get("download_dir")}

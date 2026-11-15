@@ -1,6 +1,7 @@
 import os
 import glob
 import uuid
+import re
 import threading
 from typing import Dict, Any, Optional
 import yt_dlp
@@ -9,6 +10,12 @@ from config import get_config
 tasks: Dict[str, Dict[str, Any]] = {}
 tasks_lock = threading.Lock()
 
+def clean_error_text(text: str) -> str:
+    ansi_regex = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+    cleaned = ansi_regex.sub('', text)
+    cleaned = re.sub(r'^\s*ERROR:\s*', '', cleaned)
+    return cleaned.strip()
+
 def get_video_info(url: str) -> Optional[dict]:
     ydl_opts = {
         'skip_download': True,
@@ -16,6 +23,11 @@ def get_video_info(url: str) -> Optional[dict]:
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 10,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'mweb']
+            }
+        },
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -102,6 +114,15 @@ def _download_worker(task_id: str):
     ydl_opts = {
         'format': 'ba/b',
         'outtmpl': outtmpl,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'mweb']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        },
         'postprocessors': [
             {
                 'key': 'FFmpegExtractAudio',
@@ -154,7 +175,9 @@ def _download_worker(task_id: str):
                 task['status_text'] = "Ошибка сохранения"
 
     except Exception as e:
+        err_msg = clean_error_text(str(e))
         with tasks_lock:
             task['status'] = 'FAILED'
-            task['error'] = str(e)
-            task['status_text'] = f"Ошибка: {e}"
+            task['error'] = err_msg
+            task['status_text'] = f"Ошибка: {err_msg}"
+

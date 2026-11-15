@@ -48,18 +48,53 @@ function initUI() {
     modal.classList.add("hidden");
   });
 
+  // Save manual path button
+  document.getElementById("btn-save-path")?.addEventListener("click", async () => {
+    const inputEl = document.getElementById("settings-path-input");
+    const statusEl = document.getElementById("path-save-status");
+    const newPath = inputEl.value.trim();
+    if (!newPath) return;
+
+    statusEl.textContent = "Сохранение...";
+    try {
+      const res = await fetch(`${HOST_URL}/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ download_dir: newPath }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        inputEl.value = data.download_dir;
+        statusEl.textContent = "Путь сохранен!";
+        setTimeout(() => { statusEl.textContent = ""; }, 2500);
+      } else {
+        const err = await res.json();
+        statusEl.textContent = err.detail || "Недопустимый путь";
+      }
+    } catch (e) {
+      statusEl.textContent = "Хост недоступен";
+    }
+  });
+
   // Browse folder button
   document.getElementById("btn-browse-folder")?.addEventListener("click", async () => {
+    const statusEl = document.getElementById("path-save-status");
+    statusEl.textContent = "Открываем диалог выбора папки...";
     try {
       const res = await fetch(`${HOST_URL}/select-directory`, { method: "POST" });
       if (res.ok) {
         const data = await res.json();
         if (data.selected_path) {
-          document.getElementById("settings-path-display").textContent = data.selected_path;
+          document.getElementById("settings-path-input").value = data.selected_path;
+          statusEl.textContent = "Папка выбрана и сохранена!";
+          setTimeout(() => { statusEl.textContent = ""; }, 2500);
+        } else {
+          statusEl.textContent = "";
         }
       }
     } catch (e) {
       console.error("Failed to select folder", e);
+      statusEl.textContent = "Ошибка выбора папки";
     }
   });
 
@@ -253,11 +288,14 @@ async function loadSettings() {
     const res = await fetch(`${HOST_URL}/settings`);
     if (res.ok) {
       const cfg = await res.json();
-      document.getElementById("settings-path-display").textContent =
-        cfg.download_dir || "Не выбрано";
+      const inputEl = document.getElementById("settings-path-input");
+      if (inputEl) {
+        inputEl.value = cfg.download_dir || "";
+      }
     }
   } catch (e) {
-    document.getElementById("settings-path-display").textContent = "Хост недоступен";
+    const inputEl = document.getElementById("settings-path-input");
+    if (inputEl) inputEl.value = "Хост недоступен";
   }
 }
 
