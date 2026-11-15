@@ -1,88 +1,100 @@
 # Muza
 
-Muza is a native Android application for extracting and downloading audio tracks from YouTube in MP3 format. The application is built with a focus on strict utilitarian minimalism, efficient background processing, and modern Android architecture standards.
+Muza — нативное Android-приложение для извлечения и загрузки аудиодорожек с YouTube в формате MP3 с выбором битрейта, поддержкой очереди, системного меню «Поделиться» (Share Target) и сохранением через Storage Access Framework.
 
-## Architecture and Technology Stack
+Интерфейс спроектирован в строгом утилитарном минимализме с соблюдением стандартов Material Design 3 (монохромная палитра, адаптивная иконка, отсутствие лишних декоративных элементов).
 
-- **Platform:** Native Android (Min SDK 26, Target SDK 35)
-- **Programming Language:** Kotlin 2.0.21
-- **UI Framework:** Jetpack Compose (Material 3 BOM 2024.11.00)
-- **Audio Extraction Engine:** `io.github.junkfood02.youtubedl-android:library:0.17.4` (yt-dlp embedded runtime)
-- **Audio Conversion & Tagging:** `io.github.junkfood02.youtubedl-android:ffmpeg:0.17.4`
-- **Asynchronous Architecture:** Kotlin Coroutines, StateFlow, SupervisorJob
-- **File System & Persistence:**
-  - Android Storage Access Framework (SAF) via `DocumentFile`
-  - Preferences: `androidx.datastore:datastore-preferences`
-- **Image Loading:** Coil Compose (`io.coil-kt:coil-compose`)
-- **Networking:** OkHttp 4.12.0
-- **Target ABI:** `arm64-v8a` (optimized native library packaging)
+## Внешний вид
 
-## Key Technical Features
+<p align="center">
+  <img src="screenshots/screenshot.jpg" width="320" alt="Интерфейс приложения Muza" />
+</p>
 
-1. **Decoupled FIFO Queue Management:**
-   - Link parsing and queue state are completely decoupled from UI input state.
-   - Immediate asynchronous metadata prefetching with animated skeleton states.
-   - Non-blocking batch enqueueing supporting multiple URL formats (including shorts, tracking query parameters, and plain IDs).
+## Архитектура и стек технологий
 
-2. **Foreground Download Service:**
-   - Background execution backed by `DownloadService` with `FOREGROUND_SERVICE_TYPE_DATA_SYNC`.
-   - Rate-limited notification updates (throttled to >= 1.2s and >= 3% progress deltas) to prevent notification shade reordering and stutter on custom OEM skins.
-   - Clean lifecycle management: automatic transition from ongoing progress to a single dismissible completion notification upon queue completion.
+- **Платформа:** Нативный Android (Min SDK 26, Target SDK 35)
+- **Язык программирования:** Kotlin 2.0.21
+- **UI-фреймворк:** Jetpack Compose (Material 3 BOM 2024.11.00)
+- **Движок извлечения медиа:** `io.github.junkfood02.youtubedl-android:library:0.17.4` (встроенный рантайм yt-dlp)
+- **Конвертация аудио и тегирование:** `io.github.junkfood02.youtubedl-android:ffmpeg:0.17.4` (FFmpeg)
+- **Асинхронность и многопоточность:** Kotlin Coroutines, StateFlow, SupervisorJob
+- **Файловая система и персистентность:**
+  - Android Storage Access Framework (SAF) через `androidx.documentfile:documentfile`
+  - Хранение настроек: `androidx.datastore:datastore-preferences`
+- **Загрузка изображений:** Coil Compose (`io.coil-kt:coil-compose`)
+- **Сетевой клиент:** OkHttp 4.12.0
+- **Целевая архитектура ABI:** `arm64-v8a` (оптимизированная компоновка нативных библиотек `libpython` и `libffmpeg`, размер APK ~70 МБ)
+
+## Ключевые функциональные особенности
+
+1. **Изолированная система очереди (FIFO):**
+   - Состояние очереди полностью отвязано от текстового поля ввода. Очистка поля поиска не затрагивает добавленные треки.
+   - Мгновенная предзагрузка метаданных (название, обложка, длительность) с анимированным плейсхолдером (shimmer-скелетон).
+   - Поддержка пакетного добавления ссылок и автоматическая нормализация любых форматов YouTube URL (включая Shorts, ссылки с метками времени и трекинговыми параметрами `si=`).
+
+2. **Фоновый сервис загрузки (Foreground Service):**
+   - Загрузка и конвертация выполняются в `DownloadService` с типом `FOREGROUND_SERVICE_TYPE_DATA_SYNC`.
+   - Троттлинг обновлений уведомления (не чаще одного раза в 1.2 сек и при изменении прогресса >= 3%), что исключает мигание и перескакивание шторки уведомлений на кастомных прошивках (MIUI, HyperOS).
+   - Корректный жизненный цикл уведомлений: единый идентификатор для прогресса и результата, гарантирующий отсутствие зависших плашек «Сохранение...» после завершения загрузки.
 
 3. **Storage Access Framework (SAF):**
-   - Direct integration with user-selected folders using persisted URI permissions (`ACTION_OPEN_DOCUMENT_TREE`).
-   - Compliant with Android Scoped Storage policies (Android 10 - 15) without legacy broad file system access permissions.
+   - Прямой экспорт MP3 в выбранную пользователем директорию без запроса устаревших опасных разрешений на доступ ко всему хранилищу (`MANAGE_EXTERNAL_STORAGE`).
+   - Сохранение постоянного URI-доступа через `takePersistableUriPermission`.
 
-4. **Share Target Integration:**
-   - System intent filter supporting `ACTION_SEND` and `ACTION_VIEW` for incoming YouTube links directly from the YouTube application or web browsers.
-   - Automated URL extraction from mixed text content.
+4. **Интеграция Share Target:**
+   - Обработка интентов `ACTION_SEND` и `ACTION_VIEW`. Возможность отправлять ссылки напрямую из приложения YouTube или мобильного браузера без необходимости открывать Muza вручную.
 
-5. **Authentication Support:**
-   - WebView-based YouTube authentication utility with automatic Netscape format cookie export (`cookies.txt`) for restricted or high-quality audio streams.
+5. **Авторизация YouTube:**
+   - Встроенный изолированный компонент WebView для входа в Google/YouTube-аккаунт с автоматическим экспортом сессионных cookie в формат Netscape (`cookies.txt`) для загрузки приватных треков и обхода возрастных ограничений.
 
-## Project Structure
+## Структура проекта
 
 ```
 app/src/main/java/com/muza/app/
 ├── data/
-│   ├── Config.kt                # Constants and application configuration
-│   ├── PreferencesManager.kt    # DataStore persistence layer
-│   └── UpdateChecker.kt         # Engine and release update check logic
+│   ├── Config.kt                  # Константы, битрейты и параметры User-Agent
+│   ├── PreferencesManager.kt      # Слой работы с Jetpack DataStore
+│   └── UpdateChecker.kt           # Проверка обновлений движка yt-dlp и релизов
 ├── service/
-│   ├── DownloadQueueManager.kt  # Reactive FIFO queue coordinator
-│   ├── DownloadService.kt       # Foreground service running extraction and conversion
-│   └── DownloadState.kt         # Observable state definitions
+│   ├── DownloadQueueManager.kt    # Реактивный менеджер очереди загрузок
+│   ├── DownloadService.kt         # Foreground Service загрузки и конвертации
+│   └── DownloadState.kt           # Модели состояний скачивания
 ├── ui/
-│   ├── components/              # Jetpack Compose UI components (Cards, Shimmers, Inputs)
-│   ├── screens/                 # MainScreen, SettingsScreen, YouTubeAuthScreen, ViewModels
-│   └── theme/                   # Material 3 monochromatic typography and palette
+│   ├── components/                # Компоненты Compose (карточки очереди, поле ввода, shimmer)
+│   ├── screens/                   # Экраны (MainScreen, SettingsScreen, YouTubeAuthScreen)
+│   └── theme/                     # Монохромная тема Material 3 (Theme, Color, Type)
 └── util/
-    ├── CookieNetscapeConverter.kt # Netscape HTTP Cookie file builder
-    ├── FileHelper.kt              # SAF file copy and cleanup routines
-    └── UrlExtractor.kt            # Regular expression and URL normalization engine
+    ├── CookieNetscapeConverter.kt # Конвертер CookieManager в спецификацию Netscape
+    ├── FileHelper.kt              # Операции экспорта SAF и очистки кэша
+    └── UrlExtractor.kt            # Парсинг и валидация идентификаторов видео
 ```
 
-## Building the Project
+## Сборка и установка
 
-### Prerequisites
-- JDK 17 (recommended: Eclipse Temurin or OpenJDK 17)
-- Android SDK with API Level 35 and Build Tools 35.0.0
-- Gradle 8.12 (managed via included Gradle Wrapper)
+### Требования к окружению
+- JDK 17 (OpenJDK 17 или Eclipse Temurin)
+- Android SDK (API Level 35, Build Tools 35.0.0)
+- Gradle 8.12 (поставляется через Gradle Wrapper)
 
-### Compilation Commands
+### Команды компиляции
 
-1. **Assemble Debug APK:**
+1. **Сборка Debug APK:**
    ```bash
    ./gradlew assembleDebug
    ```
-   Output path: `app/build/outputs/apk/debug/app-debug.apk`
+   Готовый файл: `app/build/outputs/apk/debug/app-debug.apk`
 
-2. **Assemble Release APK:**
+2. **Сборка Release APK:**
    ```bash
    ./gradlew assembleRelease
    ```
-   Output path: `app/build/outputs/apk/release/app-release-unsigned.apk`
+   Готовый файл: `app/build/outputs/apk/release/app-release-unsigned.apk`
 
-## License
+### Установка на устройство через ADB
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
 
-This project is licensed under the Apache License 2.0. Third-party components (`yt-dlp`, `ffmpeg`, `youtubedl-android`) remain subject to their respective licenses.
+## Лицензия
+
+Проект распространяется под лицензией Apache License 2.0. Используемые библиотеки (`yt-dlp`, `FFmpeg`, `youtubedl-android`) регулируются собственными открытыми лицензиями.
