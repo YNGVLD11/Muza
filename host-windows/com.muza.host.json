@@ -1,0 +1,9 @@
+{
+  "name": "com.muza.host",
+  "description": "Muza Desktop Native Messaging Host",
+  "path": "e:\\Muza\\host-windows\\host_runner.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://epfekipfpogjjgoabajombjnhologdfc/"
+  ]
+}

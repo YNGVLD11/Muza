@@ -9,7 +9,7 @@ import uvicorn
 import requests
 
 from config import get_config, save_config
-from downloader import get_video_info, start_download, get_task_status
+from downloader import get_video_info, start_download, get_task_status, get_active_task
 
 app = FastAPI(title="Muza Desktop Host", version="1.0.0")
 
@@ -24,6 +24,8 @@ app.add_middleware(
 class DownloadRequest(BaseModel):
     url: str
     bitrate: Optional[str] = "320"
+    title: Optional[str] = ""
+    thumbnail: Optional[str] = ""
 
 class SettingsRequest(BaseModel):
     download_dir: Optional[str] = None
@@ -47,8 +49,13 @@ def fetch_info(url: str = Query(...)):
 def download(req: DownloadRequest):
     if not req.url:
         raise HTTPException(status_code=400, detail="Отсутствует URL видео")
-    task_id = start_download(req.url, req.bitrate or "320")
+    task_id = start_download(req.url, req.bitrate or "320", req.title or "", req.thumbnail or "")
     return {"task_id": task_id}
+
+@app.get("/tasks/active")
+def active_task():
+    task = get_active_task()
+    return task or {}
 
 @app.get("/tasks/{task_id}")
 def task_status(task_id: str):
@@ -79,12 +86,30 @@ def update_settings(req: SettingsRequest):
 @app.post("/select-directory")
 def select_directory():
     cfg = get_config()
+    current_dir = cfg.get("download_dir", "")
+    escaped_dir = current_dir.replace("'", "''") if current_dir else ""
     ps_cmd = (
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-        "[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; "
-        "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-        "$f.Description = 'Выберите папку для сохранения MP3'; "
-        "if ($f.ShowDialog() -eq 'OK') { [Console]::WriteLine($f.SelectedPath) }"
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\n"
+        "try {\n"
+        "    $csharp = @'\n"
+        "    using System;\n"
+        "    using System.Runtime.InteropServices;\n"
+        "    public class Win32 {\n"
+        "        [DllImport(\"kernel32.dll\")]\n"
+        "        public static extern ushort SetThreadUILanguage(ushort LangId);\n"
+        "    }\n"
+        "'@;\n"
+        "    Add-Type -TypeDefinition $csharp -ErrorAction SilentlyContinue | Out-Null;\n"
+        "    [Win32]::SetThreadUILanguage(1049) | Out-Null;\n"
+        "} catch {}\n"
+        "[System.Threading.Thread]::CurrentThread.CurrentUICulture = 'ru-RU';\n"
+        "[System.Threading.Thread]::CurrentThread.CurrentCulture = 'ru-RU';\n"
+        "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null;\n"
+        "$f = New-Object System.Windows.Forms.FolderBrowserDialog;\n"
+        "$f.Description = 'Выберите папку для сохранения MP3';\n"
+        "$f.ShowNewFolderButton = $true;\n"
+        + (f"$f.SelectedPath = '{escaped_dir}';\n" if current_dir and os.path.exists(current_dir) else "")
+        + "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::WriteLine($f.SelectedPath) }\n"
     )
     try:
         res = subprocess.run(

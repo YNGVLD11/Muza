@@ -1,19 +1,13 @@
-const HOST_URL = "http://127.0.0.1:17890";
-
-let currentUrl = "";
 let currentBitrate = "320";
-let activeTaskId = null;
-let pollInterval = null;
-let downloadedFilePath = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   initUI();
-  await checkHostAndInitTab();
+  await checkHostAndInitQueue();
 });
 
 function initUI() {
-  // Retry host button
-  document.getElementById("btn-retry-host")?.addEventListener("click", checkHostAndInitTab);
+  // Retry host check button
+  document.getElementById("btn-retry-host")?.addEventListener("click", checkHostAndInitQueue);
 
   // Bitrate pills
   document.querySelectorAll(".pill").forEach((pill) => {
@@ -21,22 +15,43 @@ function initUI() {
       document.querySelectorAll(".pill").forEach((p) => p.classList.remove("active"));
       pill.classList.add("active");
       currentBitrate = pill.getAttribute("data-bitrate");
+
+      // Immediately synchronize all pending items in the queue to the selected bitrate
+      chrome.storage.local.get(["queue", "activeTaskId"], (res) => {
+        const queue = res.queue || [];
+        let changed = false;
+        queue.forEach((it) => {
+          if (it.status === "QUEUED" || it.status === "FETCHING_INFO") {
+            it.bitrate = currentBitrate;
+            changed = true;
+          }
+        });
+        if (changed) {
+          chrome.storage.local.set({ queue }, () => {
+            renderQueueState(queue, res.activeTaskId);
+          });
+        }
+      });
     });
   });
 
-  // Download button
-  document.getElementById("btn-download")?.addEventListener("click", startDownload);
-
-  // Open folder button
-  document.getElementById("btn-open-folder")?.addEventListener("click", openDownloadedFile);
-
-  // Manual URL submit
-  document.getElementById("btn-manual-submit")?.addEventListener("click", () => {
-    const manualUrl = document.getElementById("manual-url-input").value.trim();
-    if (manualUrl) {
-      setupMediaView(manualUrl, "Пользовательская ссылка");
+  // Submit URL button
+  document.getElementById("btn-submit-url")?.addEventListener("click", submitUrlInput);
+  document.getElementById("url-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      submitUrlInput();
     }
   });
+
+  // Clear queue button
+  document.getElementById("btn-clear-queue")?.addEventListener("click", () => {
+    chrome.runtime.sendMessage({ type: "CLEAR_QUEUE" }, () => {
+      renderQueueState([], null);
+    });
+  });
+
+  // Main action button (Download / Active status / Open folder)
+  document.getElementById("btn-main-action")?.addEventListener("click", onMainActionClick);
 
   // Settings modal
   const modal = document.getElementById("settings-modal");
@@ -48,258 +63,342 @@ function initUI() {
     modal.classList.add("hidden");
   });
 
-  // Save manual path button
-  document.getElementById("btn-save-path")?.addEventListener("click", async () => {
-    const inputEl = document.getElementById("settings-path-input");
-    const statusEl = document.getElementById("path-save-status");
-    const newPath = inputEl.value.trim();
-    if (!newPath) return;
-
-    statusEl.textContent = "Сохранение...";
-    try {
-      const res = await fetch(`${HOST_URL}/settings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ download_dir: newPath }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        inputEl.value = data.download_dir;
-        statusEl.textContent = "Путь сохранен!";
-        setTimeout(() => { statusEl.textContent = ""; }, 2500);
-      } else {
-        const err = await res.json();
-        statusEl.textContent = err.detail || "Недопустимый путь";
+  // Browse folder button: automatically sets and displays chosen path
+  document.getElementById("btn-browse-folder")?.addEventListener("click", () => {
+    chrome.runtime.sendMessage({ type: "SELECT_DIRECTORY" }, (res) => {
+      if (res && res.success && res.selected_path) {
+        const inputEl = document.getElementById("settings-path-input");
+        if (inputEl) inputEl.value = res.selected_path;
       }
-    } catch (e) {
-      statusEl.textContent = "Хост недоступен";
-    }
-  });
-
-  // Browse folder button
-  document.getElementById("btn-browse-folder")?.addEventListener("click", async () => {
-    const statusEl = document.getElementById("path-save-status");
-    statusEl.textContent = "Открываем диалог выбора папки...";
-    try {
-      const res = await fetch(`${HOST_URL}/select-directory`, { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.selected_path) {
-          document.getElementById("settings-path-input").value = data.selected_path;
-          statusEl.textContent = "Папка выбрана и сохранена!";
-          setTimeout(() => { statusEl.textContent = ""; }, 2500);
-        } else {
-          statusEl.textContent = "";
-        }
-      }
-    } catch (e) {
-      console.error("Failed to select folder", e);
-      statusEl.textContent = "Ошибка выбора папки";
-    }
+    });
   });
 
   // Check updates button
-  document.getElementById("btn-check-updates")?.addEventListener("click", async () => {
+  document.getElementById("btn-check-updates")?.addEventListener("click", () => {
     const updateInfo = document.getElementById("update-status");
     updateInfo.textContent = "Проверка...";
-    try {
-      const res = await fetch(`${HOST_URL}/check-updates`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.latest_version) {
-          updateInfo.textContent = `Доступна версия: ${data.latest_version}`;
+    chrome.runtime.sendMessage({ type: "CHECK_UPDATES" }, (res) => {
+      if (res && res.success && res.data) {
+        if (res.data.latest_version) {
+          updateInfo.textContent = `Доступна версия: ${res.data.latest_version}`;
         } else {
           updateInfo.textContent = "У вас актуальная версия";
         }
       } else {
-        updateInfo.textContent = "Не удалось проверить";
+        updateInfo.textContent = "Не удалось проверить обновления";
       }
-    } catch (e) {
-      updateInfo.textContent = "Ошибка соединения";
+    });
+  });
+
+  // Listen to background changes to live update the queue
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local") {
+      if (changes.queue || changes.activeTaskId) {
+        chrome.storage.local.get(["queue", "activeTaskId"], (res) => {
+          renderQueueState(res.queue || [], res.activeTaskId);
+        });
+      }
     }
   });
 }
 
-async function checkHostAndInitTab() {
+async function checkHostAndInitQueue() {
   const isOnline = await checkHostStatus();
   if (!isOnline) {
     showView("view-host-offline");
     return;
   }
 
-  // Query active tab
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (!tabs || tabs.length === 0) {
-      showView("view-no-media");
-      return;
-    }
+  showView("view-main");
 
+  // Load existing queue from storage
+  const storage = await chrome.storage.local.get(["queue", "activeTaskId"]);
+  const queue = storage.queue || [];
+  renderQueueState(queue, storage.activeTaskId);
+
+  // Load configured default bitrate if available
+  chrome.runtime.sendMessage({ type: "GET_SETTINGS" }, (res) => {
+    if (res && res.data && res.data.default_bitrate) {
+      setBitratePill(res.data.default_bitrate);
+    }
+  });
+
+  // Check active tab: auto-enqueue if viewing YouTube video
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (!tabs || tabs.length === 0) return;
     const tab = tabs[0];
     const url = tab.url || "";
     if (isYouTubeUrl(url)) {
       const cleanTitle = (tab.title || "YouTube Audio").replace(/ - YouTube$/, "");
-      setupMediaView(url, cleanTitle);
-    } else {
-      showView("view-no-media");
+      chrome.runtime.sendMessage({
+        type: "ENQUEUE_ITEM",
+        payload: {
+          url,
+          fallbackTitle: cleanTitle,
+          bitrate: currentBitrate,
+        },
+      }, () => {
+        chrome.storage.local.get(["queue", "activeTaskId"], (res) => {
+          renderQueueState(res.queue || [], res.activeTaskId);
+        });
+      });
     }
   });
 }
 
-async function checkHostStatus() {
-  const dot = document.getElementById("host-status-dot");
-  try {
-    const res = await fetch(`${HOST_URL}/health`, { signal: AbortSignal.timeout(1500) });
-    if (res.ok) {
-      dot.className = "status-dot online";
-      dot.title = "Хост подключен (127.0.0.1:17890)";
-      return true;
+function submitUrlInput() {
+  const inputEl = document.getElementById("url-input");
+  const url = inputEl.value.trim();
+  if (!url) return;
+
+  chrome.runtime.sendMessage({
+    type: "ENQUEUE_ITEM",
+    payload: {
+      url,
+      fallbackTitle: "YouTube Audio",
+      bitrate: currentBitrate,
+    },
+  }, (res) => {
+    if (res && res.success) {
+      inputEl.value = "";
+      chrome.storage.local.get(["queue", "activeTaskId"], (s) => {
+        renderQueueState(s.queue || [], s.activeTaskId);
+      });
     }
-  } catch (e) {
-    // Offline
+  });
+}
+
+function onMainActionClick() {
+  chrome.storage.local.get(["queue", "activeTaskId"], (res) => {
+    const queue = res.queue || [];
+    const activeId = res.activeTaskId;
+
+    if (activeId != null) return;
+
+    const hasPending = queue.some((it) => it.status === "QUEUED" || it.status === "FETCHING_INFO");
+    if (hasPending) {
+      // Ensure all pending items use the selected bitrate
+      queue.forEach((it) => {
+        if (it.status === "QUEUED" || it.status === "FETCHING_INFO") {
+          it.bitrate = currentBitrate;
+        }
+      });
+      chrome.storage.local.set({ queue }, () => {
+        chrome.runtime.sendMessage({ type: "START_QUEUE" });
+      });
+    } else {
+      const hasCompleted = queue.some((it) => it.status === "COMPLETED");
+      if (hasCompleted) {
+        chrome.runtime.sendMessage({ type: "OPEN_DIRECTORY" });
+      }
+    }
+  });
+}
+
+function renderQueueState(queue, activeTaskId) {
+  const listEl = document.getElementById("queue-list");
+  const emptyEl = document.getElementById("queue-empty");
+  const titleEl = document.getElementById("queue-title");
+  const mainBtn = document.getElementById("btn-main-action");
+  const mainBtnText = document.getElementById("main-btn-text");
+  const mainBtnIcon = document.getElementById("main-btn-icon");
+
+  if (titleEl) {
+    titleEl.textContent = `Очередь (${queue.length})`;
   }
-  dot.className = "status-dot offline";
-  dot.title = "Хост не запущен";
-  return false;
+
+  // Update empty queue placeholder
+  if (queue.length === 0) {
+    emptyEl?.classList.remove("hidden");
+    listEl.innerHTML = "";
+    if (mainBtn) {
+      mainBtn.disabled = true;
+      mainBtn.style.opacity = "0.5";
+      mainBtnText.textContent = "Скачать MP3";
+      if (mainBtnIcon) {
+        mainBtnIcon.innerHTML = `
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        `;
+      }
+    }
+    return;
+  }
+
+  emptyEl?.classList.add("hidden");
+  if (mainBtn) {
+    mainBtn.disabled = false;
+    mainBtn.style.opacity = "1";
+  }
+
+  const activeItem = queue.find((it) => it.id === activeTaskId);
+  const pendingCount = queue.filter((it) => it.status === "QUEUED" || it.status === "FETCHING_INFO").length;
+  const hasCompleted = queue.some((it) => it.status === "COMPLETED");
+
+  // Render Main Action Button text & icon
+  if (activeItem) {
+    mainBtnText.textContent = activeItem.status_text || "Скачивание...";
+    mainBtnIcon.innerHTML = `
+      <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-dasharray="28" stroke-dashoffset="10">
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite" />
+      </circle>
+    `;
+  } else if (pendingCount > 0) {
+    mainBtnText.textContent = pendingCount === 1 ? "Скачать MP3" : `Скачать всё (${pendingCount})`;
+    mainBtnIcon.innerHTML = `
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+      <polyline points="7 10 12 15 17 10"></polyline>
+      <line x1="12" y1="15" x2="12" y2="3"></line>
+    `;
+  } else if (hasCompleted) {
+    mainBtnText.textContent = "Открыть папку с треками";
+    mainBtnIcon.innerHTML = `
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+    `;
+  }
+
+  // Render queue item cards
+  listEl.innerHTML = "";
+  queue.forEach((item) => {
+    const isConverting = item.status === "CONVERTING";
+    const isCompleted = item.status === "COMPLETED";
+    const isFailed = item.status === "FAILED";
+    const isDownloading = item.status === "DOWNLOADING" || item.status === "PENDING";
+
+    const card = document.createElement("div");
+    card.className = `queue-item-card${isConverting ? " shimmering" : ""}`;
+    card.setAttribute("data-id", item.id);
+
+    let statusClass = "";
+    let displayStatusText = "В очереди";
+
+    if (isCompleted) {
+      statusClass = " completed";
+      displayStatusText = "Скачано:";
+    } else if (isFailed) {
+      statusClass = " error";
+      displayStatusText = "Ошибка";
+    } else if (isConverting) {
+      displayStatusText = "Конвертация...";
+    } else if (isDownloading) {
+      const progressPercent = Math.round(item.percent || 0);
+      displayStatusText = progressPercent > 0 ? `Скачивание: ${progressPercent}%` : (item.status_text || "Подготовка...");
+    } else if (item.status === "FETCHING_INFO") {
+      displayStatusText = "Получение инфо...";
+    }
+
+    const progressPercent = item.percent || 0;
+    const showProgress = isDownloading || isConverting;
+
+    card.innerHTML = `
+      <div class="item-thumb-box">
+        <img class="item-thumb" src="${escapeHtml(item.thumbnail || 'icons/icon128.png')}" alt="Обложка">
+      </div>
+      <div class="item-body">
+        <p class="item-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</p>
+        <div class="item-status-row">
+          <span class="item-status-text${statusClass}">${escapeHtml(displayStatusText)}</span>
+          <span class="item-bitrate-badge">${item.bitrate || currentBitrate}K</span>
+        </div>
+        ${showProgress ? `
+          <div class="item-progress-bar">
+            <div class="item-progress-fill" style="width: ${progressPercent}%;"></div>
+          </div>
+        ` : ''}
+      </div>
+      <div class="item-actions">
+        ${isCompleted && item.file_path ? `
+          <button class="item-btn-action item-btn-folder" title="Открыть в папке" data-path="${escapeHtml(item.file_path)}">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+          </button>
+        ` : ''}
+        <button class="item-btn-action item-btn-remove" title="Удалить из очереди" data-id="${item.id}">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+    `;
+
+    card.querySelector(".item-btn-remove")?.addEventListener("click", () => {
+      chrome.runtime.sendMessage({ type: "REMOVE_ITEM", payload: { id: item.id } });
+    });
+
+    card.querySelector(".item-btn-folder")?.addEventListener("click", () => {
+      if (item.file_path) {
+        chrome.runtime.sendMessage({ type: "OPEN_FILE", path: item.file_path });
+      }
+    });
+
+    listEl.appendChild(card);
+  });
+}
+
+function setBitratePill(bitrate) {
+  if (!bitrate) return;
+  currentBitrate = String(bitrate);
+  document.querySelectorAll(".pill").forEach((p) => {
+    if (p.getAttribute("data-bitrate") === currentBitrate) {
+      p.classList.add("active");
+    } else {
+      p.classList.remove("active");
+    }
+  });
+}
+
+function checkHostStatus() {
+  return new Promise((resolve) => {
+    const dot = document.getElementById("host-status-dot");
+    chrome.runtime.sendMessage({ type: "CHECK_HOST" }, (res) => {
+      if (res && res.success) {
+        dot.className = "status-dot online";
+        dot.title = "Native Host подключен";
+        resolve(true);
+      } else {
+        dot.className = "status-dot offline";
+        dot.title = "Native Host не подключен";
+        resolve(false);
+      }
+    });
+  });
 }
 
 function isYouTubeUrl(url) {
   return /^(https?:\/\/)?(www\.|m\.)?(youtube\.com\/(watch\?|shorts\/)|youtu\.be\/)/.test(url);
 }
 
-function extractYouTubeId(url) {
-  const m = url.match(/(?:v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-  return m ? m[1] : null;
-}
-
-function setupMediaView(url, fallbackTitle) {
-  currentUrl = url;
-  const vid = extractYouTubeId(url);
-  const thumbUrl = vid ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : "icons/icon128.png";
-
-  document.getElementById("media-thumbnail").src = thumbUrl;
-  document.getElementById("media-title").textContent = fallbackTitle;
-
-  // Reset actions
-  document.getElementById("btn-download").classList.remove("hidden");
-  document.getElementById("progress-container").classList.add("hidden");
-  document.getElementById("btn-open-folder").classList.add("hidden");
-
-  showView("view-media");
-
-  // Asynchronously fetch exact title from host
-  fetch(`${HOST_URL}/info?url=${encodeURIComponent(url)}`)
-    .then((r) => r.ok ? r.json() : null)
-    .then((info) => {
-      if (info && info.title) {
-        document.getElementById("media-title").textContent = info.title;
-        if (info.thumbnail) {
-          document.getElementById("media-thumbnail").src = info.thumbnail;
-        }
-      }
-    })
-    .catch(() => {});
-}
-
-async function startDownload() {
-  if (!currentUrl) return;
-
-  const btnDownload = document.getElementById("btn-download");
-  const progressBox = document.getElementById("progress-container");
-  const progressFill = document.getElementById("progress-fill");
-  const progressText = document.getElementById("progress-status-text");
-
-  btnDownload.classList.add("hidden");
-  progressBox.classList.remove("hidden");
-  progressFill.style.width = "0%";
-  progressText.textContent = "Запуск загрузки...";
-
-  try {
-    const res = await fetch(`${HOST_URL}/download`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: currentUrl, bitrate: currentBitrate }),
-    });
-
-    if (!res.ok) throw new Error("Не удалось начать скачивание");
-
-    const data = await res.json();
-    activeTaskId = data.task_id;
-    startPollingTask(activeTaskId);
-  } catch (e) {
-    progressText.textContent = "Ошибка запуска";
-    setTimeout(() => {
-      btnDownload.classList.remove("hidden");
-      progressBox.classList.add("hidden");
-    }, 2000);
-  }
-}
-
-function startPollingTask(taskId) {
-  if (pollInterval) clearInterval(pollInterval);
-
-  const progressFill = document.getElementById("progress-fill");
-  const progressText = document.getElementById("progress-status-text");
-
-  pollInterval = setInterval(async () => {
-    try {
-      const res = await fetch(`${HOST_URL}/tasks/${taskId}`);
-      if (!res.ok) return;
-
-      const task = await res.json();
-      const percent = task.percent || 0;
-      progressFill.style.width = `${percent}%`;
-      progressText.textContent = task.status_text || "Обработка...";
-
-      if (task.status === "COMPLETED") {
-        clearInterval(pollInterval);
-        downloadedFilePath = task.file_path;
-        showCompleteState();
-      } else if (task.status === "FAILED") {
-        clearInterval(pollInterval);
-        progressText.textContent = task.error || "Ошибка загрузки";
-      }
-    } catch (e) {
-      console.warn("Poll error", e);
-    }
-  }, 500);
-}
-
-function showCompleteState() {
-  document.getElementById("progress-container").classList.add("hidden");
-  const btnOpen = document.getElementById("btn-open-folder");
-  btnOpen.classList.remove("hidden");
-}
-
-async function openDownloadedFile() {
-  if (!downloadedFilePath) return;
-  try {
-    await fetch(`${HOST_URL}/open-file`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: downloadedFilePath }),
-    });
-  } catch (e) {
-    console.error("Failed to open file", e);
-  }
-}
-
-async function loadSettings() {
-  try {
-    const res = await fetch(`${HOST_URL}/settings`);
-    if (res.ok) {
-      const cfg = await res.json();
+function loadSettings() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "GET_SETTINGS" }, (res) => {
       const inputEl = document.getElementById("settings-path-input");
-      if (inputEl) {
-        inputEl.value = cfg.download_dir || "";
+      if (res && res.success && res.data) {
+        if (inputEl) inputEl.value = res.data.download_dir || "";
+        if (res.data.default_bitrate) {
+          setBitratePill(res.data.default_bitrate);
+        }
+      } else {
+        if (inputEl) inputEl.value = "Хост не подключен";
       }
-    }
-  } catch (e) {
-    const inputEl = document.getElementById("settings-path-input");
-    if (inputEl) inputEl.value = "Хост недоступен";
-  }
+      resolve();
+    });
+  });
 }
 
 function showView(viewId) {
   document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
   document.getElementById(viewId)?.classList.remove("hidden");
+}
+
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }

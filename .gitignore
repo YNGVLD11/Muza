@@ -12,3 +12,7 @@
 *.zip
 app/build
 .kotlin
+__pycache__/
+*.pyc
+*.pyo
+config.json

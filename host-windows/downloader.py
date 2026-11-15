@@ -23,11 +23,7 @@ def get_video_info(url: str) -> Optional[dict]:
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 10,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'mweb']
-            }
-        },
+        'js_runtimes': {'node': {}},
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -44,7 +40,7 @@ def get_video_info(url: str) -> Optional[dict]:
         print(f"Error fetching video info: {e}")
     return None
 
-def start_download(url: str, bitrate: str = "320") -> str:
+def start_download(url: str, bitrate: str = "320", title: str = "", thumbnail: str = "") -> str:
     task_id = str(uuid.uuid4())
     cfg = get_config()
     target_dir = cfg.get("download_dir", os.path.expanduser("~/Downloads"))
@@ -53,8 +49,10 @@ def start_download(url: str, bitrate: str = "320") -> str:
     task_info = {
         "id": task_id,
         "url": url,
+        "title": title or "YouTube Audio",
+        "thumbnail": thumbnail or "",
         "bitrate": bitrate,
-        "status": "PENDING",
+        "status": "DOWNLOADING",
         "percent": 0.0,
         "status_text": "Подготовка...",
         "target_dir": target_dir,
@@ -75,6 +73,13 @@ def get_task_status(task_id: str) -> Optional[dict]:
     with tasks_lock:
         task = tasks.get(task_id)
         return dict(task) if task else None
+
+def get_active_task() -> Optional[dict]:
+    with tasks_lock:
+        for t in reversed(list(tasks.values())):
+            if t["status"] in ("PENDING", "DOWNLOADING", "CONVERTING"):
+                return dict(t)
+    return None
 
 def _download_worker(task_id: str):
     with tasks_lock:
@@ -109,16 +114,12 @@ def _download_worker(task_id: str):
             if fp and fp.endswith('.mp3'):
                 final_files.append(fp)
 
-    outtmpl = os.path.join(target_dir, '%(title)s.%(ext)s')
+    outtmpl = os.path.join(target_dir, f'%(title)s_{bitrate}k.%(ext)s')
 
     ydl_opts = {
-        'format': 'ba/b',
+        'format': 'bestaudio/best',
         'outtmpl': outtmpl,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'mweb']
-            }
-        },
+        'js_runtimes': {'node': {}},
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -155,8 +156,10 @@ def _download_worker(task_id: str):
         if final_files and os.path.exists(final_files[-1]):
             result_file = final_files[-1]
         else:
-            # Fallback search for recently modified mp3 in target_dir
-            mp3_files = glob.glob(os.path.join(target_dir, "*.mp3"))
+            # Fallback search for recently modified mp3 with matching bitrate in target_dir
+            mp3_files = glob.glob(os.path.join(target_dir, f"*_{bitrate}k.mp3"))
+            if not mp3_files:
+                mp3_files = glob.glob(os.path.join(target_dir, "*.mp3"))
             if mp3_files:
                 result_file = max(mp3_files, key=os.path.getmtime)
 
